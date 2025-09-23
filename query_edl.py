@@ -3,40 +3,57 @@ import os
 import sys
 import argparse
 
-def get_stash_scenes_by_tag(conn, tag_name):
-    """Queries stash.db for scene IDs associated with a given tag name."""
+def get_stash_scenes_by_tag(conn, tag_names):
+    """Queries stash.db for scene IDs associated with a list of tag names."""
     cursor = conn.cursor()
-    query = """
+    # Build a list of LIKE clauses for each tag name
+    where_clauses = [f"T1.name LIKE ?" for _ in tag_names]
+    where_clause = " OR ".join(where_clauses)
+    
+    # Prepare the parameters for the query
+    params = [f"%{name}%" for name in tag_names]
+
+    query = f"""
     SELECT T2.scene_id
     FROM tags T1
     JOIN scenes_tags T2 ON T1.id = T2.tag_id
-    WHERE T1.name LIKE ?;
+    WHERE {where_clause};
     """
-    cursor.execute(query, (f'%{tag_name}%',))
+    cursor.execute(query, params)
     return [row[0] for row in cursor.fetchall()]
 
-def get_stash_scenes_by_performer(conn, performer_name):
-    """Queries stash.db for scene IDs associated with a given performer name."""
+def get_stash_scenes_by_performer(conn, performer_names):
+    """Queries stash.db for scene IDs associated with a list of performer names."""
     cursor = conn.cursor()
-    query = """
+    where_clauses = [f"T1.name LIKE ?" for _ in performer_names]
+    where_clause = " OR ".join(where_clauses)
+    
+    params = [f"%{name}%" for name in performer_names]
+
+    query = f"""
     SELECT T2.scene_id
     FROM performers T1
     JOIN performers_scenes T2 ON T1.id = T2.performer_id
-    WHERE T1.name LIKE ?;
+    WHERE {where_clause};
     """
-    cursor.execute(query, (f'%{performer_name}%',))
+    cursor.execute(query, params)
     return [row[0] for row in cursor.fetchall()]
 
-def get_stash_scenes_by_studio(conn, studio_name):
-    """Queries stash.db for scene IDs associated with a given studio name."""
+def get_stash_scenes_by_studio(conn, studio_names):
+    """Queries stash.db for scene IDs associated with a list of studio names."""
     cursor = conn.cursor()
-    query = """
+    where_clauses = [f"T1.name LIKE ?" for _ in studio_names]
+    where_clause = " OR ".join(where_clauses)
+    
+    params = [f"%{name}%" for name in studio_names]
+
+    query = f"""
     SELECT T2.id
     FROM studios T1
     JOIN scenes T2 ON T1.id = T2.studio_id
-    WHERE T1.name LIKE ?;
+    WHERE {where_clause};
     """
-    cursor.execute(query, (f'%{studio_name}%',))
+    cursor.execute(query, params)
     return [row[0] for row in cursor.fetchall()]
 
 def get_stash_file_id_by_scene_id(conn, scene_id):
@@ -50,7 +67,7 @@ def get_stash_file_id_by_scene_id(conn, scene_id):
     cursor.execute(query, (scene_id,))
     return [row[0] for row in cursor.fetchall()]
 
-def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value, limit):
+def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values, limit):
     """
     Queries stash.db for scenes based on metadata and generates an EDL.
     """
@@ -62,16 +79,16 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value,
         return
 
     # 1. Get Scene IDs from Stash DB based on the query type
-    scene_ids = []
+    scene_ids = set()
     if query_type == 'tag':
-        scene_ids = get_stash_scenes_by_tag(stash_conn, query_value)
+        scene_ids.update(get_stash_scenes_by_tag(stash_conn, query_values))
     elif query_type == 'performer':
-        scene_ids = get_stash_scenes_by_performer(stash_conn, query_value)
+        scene_ids.update(get_stash_scenes_by_performer(stash_conn, query_values))
     elif query_type == 'studio':
-        scene_ids = get_stash_scenes_by_studio(stash_conn, query_value)
+        scene_ids.update(get_stash_scenes_by_studio(stash_conn, query_values))
 
     if not scene_ids:
-        print(f"No scenes found for {query_type} '{query_value}'.")
+        print(f"No scenes found for {query_type} '{query_values}'.")
         stash_conn.close()
         local_conn.close()
         return
@@ -96,7 +113,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value,
     
     # SQL query with a limit and random ordering
     query = f"""
-    SELECT T3.file_path, T1.start_time_ms / 1000.0, T1.length_ms / 1000.0
+    SELECT T2.file_path, T1.start_time_ms / 1000.0, T1.length_ms / 1000.0
     FROM edl_records T1
     JOIN local_files T2 ON T1.local_file_id = T2.local_id
     WHERE T2.stash_file_id IN ({','.join(['?'] * len(stash_file_ids_tuple))})
@@ -172,9 +189,9 @@ if __name__ == "__main__":
     # Subparser for the 'by_stash' mode
     stash_parser = subparsers.add_parser('by_stash', help='Query based on Stash metadata (tags, performers, studios).')
     group = stash_parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--tag', help="Filter by Stash tag name.")
-    group.add_argument('--performer', help="Filter by Stash performer name.")
-    group.add_argument('--studio', help="Filter by Stash studio name.")
+    group.add_argument('--tag', nargs='+', help="Filter by Stash tag name.")
+    group.add_argument('--performer', nargs='+', help="Filter by Stash performer name.")
+    group.add_argument('--studio', nargs='+', help="Filter by Stash studio name.")
     stash_parser.add_argument('--limit', type=int, default=400, help="Maximum number of records to return (default: 400).")
 
     # Subparser for the 'by_edl' mode
