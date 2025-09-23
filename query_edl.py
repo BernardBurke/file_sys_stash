@@ -50,7 +50,7 @@ def get_stash_file_id_by_scene_id(conn, scene_id):
     cursor.execute(query, (scene_id,))
     return [row[0] for row in cursor.fetchall()]
 
-def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value):
+def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value, limit):
     """
     Queries stash.db for scenes based on metadata and generates an EDL.
     """
@@ -101,7 +101,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value)
     JOIN local_files T2 ON T1.local_file_id = T2.local_id
     WHERE T2.stash_file_id IN ({','.join(['?'] * len(stash_file_ids_tuple))})
     ORDER BY RANDOM()
-    LIMIT 1000;
+    LIMIT {limit};
     """
     local_cursor.execute(query, stash_file_ids_tuple)
     
@@ -119,7 +119,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_value)
     for file_path, start_time, length in edl_records:
         print(f"{file_path},{start_time},{length}")
 
-def generate_edl_by_edl_filename(local_db_path, edl_filenames):
+def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit):
     """
     Queries sync.db for EDL records based on a list of filenames and generates an EDL.
     """
@@ -149,7 +149,7 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames):
     JOIN local_files T3 ON T1.local_file_id = T3.local_id
     WHERE {where_clause}
     ORDER BY RANDOM()
-    LIMIT 1000;
+    LIMIT {limit};
     """
     local_cursor.execute(query, filename_patterns)
     edl_records = local_cursor.fetchall()
@@ -175,10 +175,12 @@ if __name__ == "__main__":
     group.add_argument('--tag', help="Filter by Stash tag name.")
     group.add_argument('--performer', help="Filter by Stash performer name.")
     group.add_argument('--studio', help="Filter by Stash studio name.")
+    stash_parser.add_argument('--limit', type=int, default=400, help="Maximum number of records to return (default: 400).")
 
     # Subparser for the 'by_edl' mode
     edl_parser = subparsers.add_parser('by_edl', help='Query based on EDL filename.')
     edl_parser.add_argument('--filename', nargs='+', required=True, help="Filter by one or more EDL filenames.")
+    edl_parser.add_argument('--limit', type=int, default=400, help="Maximum number of records to return (default: 400).")
 
     args = parser.parse_args()
 
@@ -191,11 +193,11 @@ if __name__ == "__main__":
 
     if args.mode == 'by_stash':
         if args.tag:
-            generate_edl_by_stash(stash_db_path, local_db_path, 'tag', args.tag)
+            generate_edl_by_stash(stash_db_path, local_db_path, 'tag', args.tag, args.limit)
         elif args.performer:
-            generate_edl_by_stash(stash_db_path, local_db_path, 'performer', args.performer)
+            generate_edl_by_stash(stash_db_path, local_db_path, 'performer', args.performer, args.limit)
         elif args.studio:
-            generate_edl_by_stash(stash_db_path, local_db_path, 'studio', args.studio)
+            generate_edl_by_stash(stash_db_path, local_db_path, 'studio', args.studio, args.limit)
     
     elif args.mode == 'by_edl':
-        generate_edl_by_edl_filename(local_db_path, args.filename)
+        generate_edl_by_edl_filename(local_db_path, args.filename, args.limit)
