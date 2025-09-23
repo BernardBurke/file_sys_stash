@@ -75,7 +75,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
         stash_conn = sqlite3.connect(stash_db_path)
         local_conn = sqlite3.connect(local_db_path)
     except sqlite3.Error as e:
-        print(f"Error connecting to databases: {e}")
+        print(f"Error connecting to databases: {e}", file=sys.stderr)
         return
 
     # 1. Get Scene IDs from Stash DB based on the query type
@@ -88,7 +88,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
         scene_ids.update(get_stash_scenes_by_studio(stash_conn, query_values))
 
     if not scene_ids:
-        print(f"No scenes found for {query_type} '{query_values}'.")
+        print(f"No scenes found for {query_type} '{query_values}'.", file=sys.stderr)
         stash_conn.close()
         local_conn.close()
         return
@@ -100,7 +100,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
         stash_file_ids.update(file_ids)
 
     if not stash_file_ids:
-        print(f"No video files found for the selected scenes.")
+        print(f"No video files found for the selected scenes.", file=sys.stderr)
         stash_conn.close()
         local_conn.close()
         return
@@ -126,7 +126,7 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
     local_conn.close()
 
     if not edl_records:
-        print(f"No EDL records found linked to the selected Stash metadata.")
+        print(f"No EDL records found linked to the selected Stash metadata.", file=sys.stderr)
         return
 
     # 4. Generate the EDL output
@@ -135,7 +135,8 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
         for file_path, start_time, length in edl_records:
             f.write(f"{file_path},{start_time},{length}\n")
     
-    print(f"EDL generated and saved to {output_file}")
+    print(f"EDL generated and saved to {output_file}", file=sys.stderr)
+    print(f'export QEOL="{output_file}"')
 
 
 def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit, output_file):
@@ -146,7 +147,7 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit, output_fil
         local_conn = sqlite3.connect(local_db_path)
         local_cursor = local_conn.cursor()
     except sqlite3.Error as e:
-        print(f"Error connecting to local database: {e}")
+        print(f"Error connecting to local database: {e}", file=sys.stderr)
         return
 
     filename_patterns = []
@@ -173,7 +174,7 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit, output_fil
     local_conn.close()
 
     if not edl_records:
-        print(f"No EDL records found for filenames '{edl_filenames}'.")
+        print(f"No EDL records found for filenames '{edl_filenames}'.", file=sys.stderr)
         return
 
     with open(output_file, 'w') as f:
@@ -181,7 +182,8 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit, output_fil
         for file_path, start_time, length in edl_records:
             f.write(f"{file_path},{start_time},{length}\n")
 
-    print(f"EDL generated and saved to {output_file}")
+    print(f"EDL generated and saved to {output_file}", file=sys.stderr)
+    print(f'export QEOL="{output_file}"')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -190,17 +192,17 @@ if __name__ == "__main__":
         Examples:
         
         # Get up to 400 random clips related to the 'gym' or 'training' tags.
-        python query_edl.py by_stash --tag gym training
+        eval $(python query_edl.py by_stash --tag gym training)
         
         # Get up to 1000 random clips related to the performer 'Ben'.
-        python query_edl.py by_stash --performer "Ben Dover" --limit 1000
+        eval $(python query_edl.py by_stash --performer "Ben Dover" --limit 1000)
         
         # Get up to 400 random clips from EDL files with 'athletics' or 'running' in their name.
-        python query_edl.py by_edl --filename athletics running
+        eval $(python query_edl.py by_edl --filename athletics running)
         
         # Generate an EDL from files named 'sports.edl' and 'sports_chopped1-6.edl'
         # and save it to a specific file.
-        python query_edl.py by_edl --filename sports --output my_sports_list.edl
+        eval $(python query_edl.py by_edl --filename sports --output my_sports_list.edl)
         
         # All output files are saved to the directory specified by the QEO environment variable.
         """
@@ -229,10 +231,9 @@ if __name__ == "__main__":
     output_dir = os.getenv("QEO")
     
     if not stash_db_path or not local_db_path:
-        print("Error: Both STASH_DB_PATH and SYNC_DB_PATH environment variables must be set.")
+        print("Error: Both STASH_DB_PATH and SYNC_DB_PATH environment variables must be set.", file=sys.stderr)
         sys.exit(1)
 
-    # Generate output path based on arguments
     output_file_path = args.output
     if not output_file_path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -255,10 +256,10 @@ if __name__ == "__main__":
         if output_dir:
             output_file_path = os.path.join(output_dir, output_filename)
         else:
-            print("Warning: QEO environment variable is not set. Saving output to the current directory.")
+            print("Warning: QEO environment variable is not set. Saving output to the current directory.", file=sys.stderr)
             output_file_path = output_filename
     
-    else: # If --output is supplied, prepend the QEO directory if it exists
+    else: 
         if output_dir:
             output_file_path = os.path.join(output_dir, output_file_path)
 
