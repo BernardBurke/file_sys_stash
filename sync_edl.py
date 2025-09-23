@@ -185,8 +185,11 @@ def ingest_edl_files(local_db_path, edl_root_path):
                             continue
                         
                         for line_number, line in enumerate(edl_file, 2):
-                            # New regex to handle comma separation
-                            match = re.match(r'^(.*),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)$', line.strip())
+                            line = line.strip()
+                            if not line or line.startswith('#'):
+                                continue # Ignore blank lines and comments
+                            
+                            match = re.match(r'^(.*),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)$', line)
                             if match:
                                 file_path, start_time_s, length_s = match.groups()
                                 normalized_path = os.path.normpath(file_path)
@@ -207,8 +210,7 @@ def ingest_edl_files(local_db_path, edl_root_path):
                                 else:
                                     log_file.write(f"[{full_edl_path}:{line_number}] File path not found in local DB: {normalized_path}\n")
                             else:
-                                if line.strip():
-                                    log_file.write(f"[{full_edl_path}:{line_number}] Unparsed line: {line.strip()}\n")
+                                log_file.write(f"[{full_edl_path}:{line_number}] Unparsed line: {line}\n")
 
                 except Exception as e:
                     log_file.write(f"Error processing EDL file {full_edl_path}: {e}\n")
