@@ -2,15 +2,15 @@ import sqlite3
 import os
 import sys
 import argparse
+import datetime
+import re
 
 def get_stash_scenes_by_tag(conn, tag_names):
     """Queries stash.db for scene IDs associated with a list of tag names."""
     cursor = conn.cursor()
-    # Build a list of LIKE clauses for each tag name
     where_clauses = [f"T1.name LIKE ?" for _ in tag_names]
     where_clause = " OR ".join(where_clauses)
     
-    # Prepare the parameters for the query
     params = [f"%{name}%" for name in tag_names]
 
     query = f"""
@@ -67,7 +67,7 @@ def get_stash_file_id_by_scene_id(conn, scene_id):
     cursor.execute(query, (scene_id,))
     return [row[0] for row in cursor.fetchall()]
 
-def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values, limit):
+def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values, limit, output_file):
     """
     Queries stash.db for scenes based on metadata and generates an EDL.
     """
@@ -108,10 +108,8 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
     # 3. Get EDL records from our local DB
     local_cursor = local_conn.cursor()
     
-    # Use a tuple to query for multiple IDs
     stash_file_ids_tuple = tuple(stash_file_ids)
     
-    # SQL query with a limit and random ordering
     query = f"""
     SELECT T2.file_path, T1.start_time_ms / 1000.0, T1.length_ms / 1000.0
     FROM edl_records T1
@@ -132,11 +130,15 @@ def generate_edl_by_stash(stash_db_path, local_db_path, query_type, query_values
         return
 
     # 4. Generate the EDL output
-    print("# mpv EDL v0")
-    for file_path, start_time, length in edl_records:
-        print(f"{file_path},{start_time},{length}")
+    with open(output_file, 'w') as f:
+        f.write("# mpv EDL v0\n")
+        for file_path, start_time, length in edl_records:
+            f.write(f"{file_path},{start_time},{length}\n")
+    
+    print(f"EDL generated and saved to {output_file}")
 
-def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit):
+
+def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit, output_file):
     """
     Queries sync.db for EDL records based on a list of filenames and generates an EDL.
     """
@@ -147,7 +149,6 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit):
         print(f"Error connecting to local database: {e}")
         return
 
-    # Build the list of filename patterns for the query
     filename_patterns = []
     for filename in edl_filenames:
         if not filename.lower().endswith('.edl'):
@@ -155,7 +156,6 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit):
         else:
             filename_patterns.append(f'%{filename}%')
             
-    # Build the WHERE clause with OR conditions
     where_clauses = ['T2.filename LIKE ?'] * len(filename_patterns)
     where_clause = ' OR '.join(where_clauses)
 
@@ -175,46 +175,103 @@ def generate_edl_by_edl_filename(local_db_path, edl_filenames, limit):
     if not edl_records:
         print(f"No EDL records found for filenames '{edl_filenames}'.")
         return
-    
-    print("# mpv EDL v0")
-    for file_path, start_time, length in edl_records:
-        print(f"{file_path},{start_time},{length}")
+
+    with open(output_file, 'w') as f:
+        f.write("# mpv EDL v0\n")
+        for file_path, start_time, length in edl_records:
+            f.write(f"{file_path},{start_time},{length}\n")
+
+    print(f"EDL generated and saved to {output_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Query Stash and Sync databases to generate EDL files."
+        description="A utility to query Stash and Sync databases to generate EDL files based on various criteria.",
+        epilog="""
+        Examples:
+        
+        # Get up to 400 random clips related to the 'gym' or 'training' tags.
+        python query_edl.py by_stash --tag gym training
+        
+        # Get up to 1000 random clips related to the performer 'Ben'.
+        python query_edl.py by_stash --performer "Ben Dover" --limit 1000
+        
+        # Get up to 400 random clips from EDL files with 'athletics' or 'running' in their name.
+        python query_edl.py by_edl --filename athletics running
+        
+        # Generate an EDL from files named 'sports.edl' and 'sports_chopped1-6.edl'
+        # and save it to a specific file.
+        python query_edl.py by_edl --filename sports --output my_sports_list.edl
+        
+        # All output files are saved to the directory specified by the QEO environment variable.
+        """
     )
-    subparsers = parser.add_subparsers(dest='mode', help='Query mode', required=True)
+    subparsers = parser.add_subparsers(dest='mode', help='Available commands', required=True)
 
     # Subparser for the 'by_stash' mode
     stash_parser = subparsers.add_parser('by_stash', help='Query based on Stash metadata (tags, performers, studios).')
     group = stash_parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--tag', nargs='+', help="Filter by Stash tag name.")
-    group.add_argument('--performer', nargs='+', help="Filter by Stash performer name.")
-    group.add_argument('--studio', nargs='+', help="Filter by Stash studio name.")
+    group.add_argument('--tag', nargs='+', help="Filter by Stash tag names (partial matching).")
+    group.add_argument('--performer', nargs='+', help="Filter by Stash performer names (partial matching).")
+    group.add_argument('--studio', nargs='+', help="Filter by Stash studio names (partial matching).")
     stash_parser.add_argument('--limit', type=int, default=400, help="Maximum number of records to return (default: 400).")
+    stash_parser.add_argument('--output', help="Output filename for the EDL. Overwrites existing file.")
 
     # Subparser for the 'by_edl' mode
     edl_parser = subparsers.add_parser('by_edl', help='Query based on EDL filename.')
-    edl_parser.add_argument('--filename', nargs='+', required=True, help="Filter by one or more EDL filenames.")
+    edl_parser.add_argument('--filename', nargs='+', required=True, help="Filter by one or more EDL filenames (partial matching).")
     edl_parser.add_argument('--limit', type=int, default=400, help="Maximum number of records to return (default: 400).")
+    edl_parser.add_argument('--output', help="Output filename for the EDL. Overwrites existing file.")
 
     args = parser.parse_args()
 
     stash_db_path = os.getenv("STASH_DB_PATH")
     local_db_path = os.getenv("SYNC_DB_PATH")
-
+    output_dir = os.getenv("QEO")
+    
     if not stash_db_path or not local_db_path:
         print("Error: Both STASH_DB_PATH and SYNC_DB_PATH environment variables must be set.")
         sys.exit(1)
 
+    # Generate output path based on arguments
+    output_file_path = args.output
+    if not output_file_path:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if args.mode == 'by_stash':
+            if args.tag:
+                query_words = "_".join(args.tag)
+                output_filename = f"by_stash_tag_{query_words}_{timestamp}.edl"
+            elif args.performer:
+                query_words = "_".join(args.performer)
+                output_filename = f"by_stash_performer_{query_words}_{timestamp}.edl"
+            elif args.studio:
+                query_words = "_".join(args.studio)
+                output_filename = f"by_stash_studio_{query_words}_{timestamp}.edl"
+        elif args.mode == 'by_edl':
+            query_words = "_".join(args.filename)
+            output_filename = f"by_edl_filename_{query_words}_{timestamp}.edl"
+        
+        output_filename = re.sub(r'[^a-zA-Z0-9_.]', '', output_filename)
+        
+        if output_dir:
+            output_file_path = os.path.join(output_dir, output_filename)
+        else:
+            print("Warning: QEO environment variable is not set. Saving output to the current directory.")
+            output_file_path = output_filename
+    
+    else: # If --output is supplied, prepend the QEO directory if it exists
+        if output_dir:
+            output_file_path = os.path.join(output_dir, output_file_path)
+
+    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+
+
     if args.mode == 'by_stash':
         if args.tag:
-            generate_edl_by_stash(stash_db_path, local_db_path, 'tag', args.tag, args.limit)
+            generate_edl_by_stash(stash_db_path, local_db_path, 'tag', args.tag, args.limit, output_file_path)
         elif args.performer:
-            generate_edl_by_stash(stash_db_path, local_db_path, 'performer', args.performer, args.limit)
+            generate_edl_by_stash(stash_db_path, local_db_path, 'performer', args.performer, args.limit, output_file_path)
         elif args.studio:
-            generate_edl_by_stash(stash_db_path, local_db_path, 'studio', args.studio, args.limit)
+            generate_edl_by_stash(stash_db_path, local_db_path, 'studio', args.studio, args.limit, output_file_path)
     
     elif args.mode == 'by_edl':
-        generate_edl_by_edl_filename(local_db_path, args.filename, args.limit)
+        generate_edl_by_edl_filename(local_db_path, args.filename, args.limit, output_file_path)
