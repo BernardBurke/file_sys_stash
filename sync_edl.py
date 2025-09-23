@@ -7,7 +7,8 @@ import re
 
 def create_local_db(conn):
     """
-    Creates the local_files and edl_records tables in the provided database connection.
+    Creates the local_files, edl_files, edl_records, and edl_metadata tables
+    in the provided database connection.
     """
     cursor = conn.cursor()
     cursor.execute("""
@@ -18,13 +19,42 @@ def create_local_db(conn):
         );
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS edl_files (
+            edl_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT NOT NULL UNIQUE,
+            ingested_at DATETIME NOT NULL
+        );
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS edl_records (
             record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            edl_id INTEGER NOT NULL,
             local_file_id INTEGER NOT NULL,
             start_time_ms REAL NOT NULL,
             length_ms REAL NOT NULL,
+            FOREIGN KEY(edl_id) REFERENCES edl_files(edl_id),
             FOREIGN KEY(local_file_id) REFERENCES local_files(local_id),
-            UNIQUE(local_file_id, start_time_ms, length_ms)
+            UNIQUE(edl_id, local_file_id, start_time_ms, length_ms)
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS edl_metadata (
+            edl_id INTEGER PRIMARY KEY,
+            style TEXT,
+            age_group TEXT,
+            rating INTEGER,
+            power REAL,
+            text1 TEXT,
+            text2 TEXT,
+            text3 TEXT,
+            text4 TEXT,
+            text5 TEXT,
+            text6 TEXT,
+            text7 TEXT,
+            text8 TEXT,
+            text9 TEXT,
+            text10 TEXT,
+            FOREIGN KEY(edl_id) REFERENCES edl_files(edl_id)
         );
     """)
     conn.commit()
@@ -79,9 +109,8 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
         print("No media files found to process.")
         return
 
-    # Connect to an in-memory database for fast operations
     local_conn = sqlite3.connect(':memory:')
-    create_local_db(local_conn) # Pass the connection object to the creation function
+    create_local_db(local_conn)
 
     local_cursor = local_conn.cursor()
 
@@ -124,7 +153,6 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
     
     local_conn.commit()
 
-    # Backup the in-memory database to a persistent file
     print(f"\n\nSaving in-memory database to {local_db_path}...")
     final_conn = sqlite3.connect(local_db_path)
     local_conn.backup(final_conn)
@@ -177,17 +205,36 @@ def ingest_edl_files(local_db_path, edl_root_path):
                 full_edl_path = os.path.join(dirpath, filename)
                 try:
                     with open(full_edl_path, 'r', encoding='utf-8') as edl_file:
-                        # Check for the required header
-                        header_line = edl_file.readline().strip()
-                        if header_line != "# mpv EDL v0":
-                            log_file.write(f"[{full_edl_path}] Invalid header: {header_line}\n")
-                            edl_files_processed += 1
+                        file_contents = edl_file.read().strip()
+                        lines = file_contents.splitlines()
+
+                        if not lines:
+                            log_file.write(f"[{full_edl_path}] File is empty.\n")
                             continue
+
+                        header_line = lines[0].strip()
+                        if header_line != "# mpv EDL v0":
+                            log_file.write(f"[{full_edl_path}] Invalid header: '{header_line}'\n")
+                            continue
+
+                        # Insert EDL file and metadata
+                        edl_name_without_ext = os.path.splitext(filename)[0]
+                        style_name = re.sub(r'_chopped\d-\d$', '', edl_name_without_ext)
                         
-                        for line_number, line in enumerate(edl_file, 2):
+                        local_cursor.execute(
+                            "INSERT INTO edl_files (filename, ingested_at) VALUES (?, ?)",
+                            (filename, datetime.datetime.now())
+                        )
+                        edl_id = local_cursor.lastrowid
+                        local_cursor.execute(
+                            "INSERT INTO edl_metadata (edl_id, style) VALUES (?, ?)",
+                            (edl_id, style_name)
+                        )
+
+                        for line_number, line in enumerate(lines[1:], 2):
                             line = line.strip()
                             if not line or line.startswith('#'):
-                                continue # Ignore blank lines and comments
+                                continue
                             
                             match = re.match(r'^(.*),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)$', line)
                             if match:
@@ -201,8 +248,8 @@ def ingest_edl_files(local_db_path, edl_root_path):
                                     
                                     try:
                                         local_cursor.execute(
-                                            "INSERT INTO edl_records (local_file_id, start_time_ms, length_ms) VALUES (?, ?, ?)",
-                                            (local_id, start_time_ms, length_ms)
+                                            "INSERT INTO edl_records (edl_id, local_file_id, start_time_ms, length_ms) VALUES (?, ?, ?, ?)",
+                                            (edl_id, local_id, start_time_ms, length_ms)
                                         )
                                         records_added_count += 1
                                     except sqlite3.IntegrityError:
