@@ -5,11 +5,10 @@ import datetime
 import argparse
 import re
 
-def create_local_db(db_path):
+def create_local_db(conn):
     """
-    Creates the local_files and edl_records tables in the new database if they don't exist.
+    Creates the local_files and edl_records tables in the provided database connection.
     """
-    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS local_files (
@@ -29,7 +28,6 @@ def create_local_db(db_path):
         );
     """)
     conn.commit()
-    conn.close()
 
 def get_stash_files(stash_db_path):
     """
@@ -66,11 +64,11 @@ def get_file_count(filesystem_path, extensions):
 
 def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
     """
-    Scans the filesystem, verifies against stash.db, and populates the local database.
+    Scans the filesystem, verifies against stash.db, populates an in-memory
+    database, and then saves it to a persistent file.
     """
     MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.mp3', '.wav', '.flac', '.aac'}
 
-    create_local_db(local_db_path)
     print("Reading file paths from stash.db...")
     stash_files = get_stash_files(stash_db_path)
     if stash_files is None:
@@ -81,7 +79,10 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
         print("No media files found to process.")
         return
 
-    local_conn = sqlite3.connect(local_db_path)
+    # Connect to an in-memory database for fast operations
+    local_conn = sqlite3.connect(':memory:')
+    create_local_db(local_conn) # Pass the connection object to the creation function
+
     local_cursor = local_conn.cursor()
 
     missing_log_path = "/tmp/stash_missing_files.log"
@@ -122,9 +123,15 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
                 sys.stdout.flush()
     
     local_conn.commit()
+
+    # Backup the in-memory database to a persistent file
+    print(f"\n\nSaving in-memory database to {local_db_path}...")
+    final_conn = sqlite3.connect(local_db_path)
+    local_conn.backup(final_conn)
+    final_conn.close()
     local_conn.close()
     
-    print("\n\nSync complete!")
+    print("\nSync complete!")
     print(f"Found and linked {found_count} files.")
     print(f"Files missing from stash.db: {missing_count}")
     print(f"Full log of missing files can be found at {missing_log_path}")
@@ -135,11 +142,14 @@ def ingest_edl_files(local_db_path, edl_root_path):
     """
     EDL_EXTENSIONS = {'.edl'}
     
-    create_local_db(local_db_path)
-    local_conn = sqlite3.connect(local_db_path)
-    local_cursor = local_conn.cursor()
+    if not os.path.exists(local_db_path):
+        print(f"Error: Local database '{local_db_path}' not found. Please run the 'sync' command first.")
+        sys.exit(1)
 
+    local_conn = sqlite3.connect(local_db_path)
+    
     local_file_lookup = {}
+    local_cursor = local_conn.cursor()
     local_cursor.execute("SELECT local_id, file_path FROM local_files;")
     for local_id, file_path in local_cursor.fetchall():
         local_file_lookup[os.path.normpath(file_path)] = local_id
@@ -167,8 +177,16 @@ def ingest_edl_files(local_db_path, edl_root_path):
                 full_edl_path = os.path.join(dirpath, filename)
                 try:
                     with open(full_edl_path, 'r', encoding='utf-8') as edl_file:
-                        for line_number, line in enumerate(edl_file, 1):
-                            match = re.match(r'^(.*)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$', line.strip())
+                        # Check for the required header
+                        header_line = edl_file.readline().strip()
+                        if header_line != "# mpv EDL v0":
+                            log_file.write(f"[{full_edl_path}] Invalid header: {header_line}\n")
+                            edl_files_processed += 1
+                            continue
+                        
+                        for line_number, line in enumerate(edl_file, 2):
+                            # New regex to handle comma separation
+                            match = re.match(r'^(.*),(\d+(?:\.\d+)?),(\d+(?:\.\d+)?)$', line.strip())
                             if match:
                                 file_path, start_time_s, length_s = match.groups()
                                 normalized_path = os.path.normpath(file_path)
@@ -185,11 +203,11 @@ def ingest_edl_files(local_db_path, edl_root_path):
                                         )
                                         records_added_count += 1
                                     except sqlite3.IntegrityError:
-                                        pass # Skip duplicates
+                                        pass
                                 else:
                                     log_file.write(f"[{full_edl_path}:{line_number}] File path not found in local DB: {normalized_path}\n")
                             else:
-                                if line.strip(): # Log non-empty lines that don't match the pattern
+                                if line.strip():
                                     log_file.write(f"[{full_edl_path}:{line_number}] Unparsed line: {line.strip()}\n")
 
                 except Exception as e:
@@ -213,11 +231,9 @@ if __name__ == "__main__":
     )
     subparsers = parser.add_subparsers(dest='command', help='Available commands', required=True)
 
-    # Subparser for the 'sync' command
     sync_parser = subparsers.add_parser('sync', help='Scan a filesystem and sync with Stash.')
     sync_parser.add_argument('filesystem_root', help="The root directory of the media library to scan.")
     
-    # Subparser for the 'ingest' command
     ingest_parser = subparsers.add_parser('ingest', help='Ingest EDL files from a directory.')
     ingest_parser.add_argument('edl_root', help="The root directory containing EDL files.")
     
