@@ -97,7 +97,7 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
     Scans the filesystem, verifies against stash.db, populates an in-memory
     database, and then saves it to a persistent file.
     """
-    MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.mp3', '.wav', '.flac', '.aac'}
+    MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', 'webm', '.flv', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.mp3', '.wav', '.flac', '.aac'}
 
     print("Reading file paths from stash.db...")
     stash_files = get_stash_files(stash_db_path)
