@@ -5,6 +5,10 @@ import datetime
 import argparse
 import re
 
+# ----------------------------------------------------------------------------------------------------------------------
+# DATABASE STRUCTURE
+# ----------------------------------------------------------------------------------------------------------------------
+
 def create_local_db(conn):
     """
     Creates the local_files, edl_files, edl_records, and edl_metadata tables
@@ -59,6 +63,10 @@ def create_local_db(conn):
     """)
     conn.commit()
 
+# ----------------------------------------------------------------------------------------------------------------------
+# UTILITY FUNCTIONS
+# ----------------------------------------------------------------------------------------------------------------------
+
 def get_stash_files(stash_db_path):
     """
     Reads all file paths and IDs from the stash.db and returns them as a dictionary.
@@ -74,6 +82,7 @@ def get_stash_files(stash_db_path):
         """)
         rows = cursor.fetchall()
         for stash_id, full_path in rows:
+            # os.path.normpath is crucial for matching
             stash_files[os.path.normpath(full_path)] = stash_id
         conn.close()
     except sqlite3.Error as e:
@@ -92,27 +101,39 @@ def get_file_count(filesystem_path, extensions):
                 count += 1
     return count
 
-def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
+# ----------------------------------------------------------------------------------------------------------------------
+# COMMANDS
+# ----------------------------------------------------------------------------------------------------------------------
+
+def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path, rebuild=False):
     """
-    Scans the filesystem, verifies against stash.db, populates an in-memory
-    database, and then saves it to a persistent file.
+    Scans the filesystem, verifies against stash.db, populates a database,
+    and handles incremental updates or full rebuilds.
     """
     MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', 'webm', '.flv', '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.mp3', '.wav', '.flac', '.aac'}
+
+    # 1. HANDLE REBUILD LOGIC
+    if rebuild and os.path.exists(local_db_path):
+        print(f"⚠️ Rebuild requested: Deleting existing local DB at '{local_db_path}'...")
+        os.remove(local_db_path)
+    
+    # 2. SETUP DATABASE CONNECTION
+    local_conn = sqlite3.connect(local_db_path)
+    create_local_db(local_conn)
+    local_cursor = local_conn.cursor()
 
     print("Reading file paths from stash.db...")
     stash_files = get_stash_files(stash_db_path)
     if stash_files is None:
+        local_conn.close()
         return
 
+    # 3. FILE SCANNING AND POPULATION LOGIC
     total_files = get_file_count(filesystem_path, MEDIA_EXTENSIONS)
     if total_files == 0:
         print("No media files found to process.")
+        local_conn.close()
         return
-
-    local_conn = sqlite3.connect(':memory:')
-    create_local_db(local_conn)
-
-    local_cursor = local_conn.cursor()
 
     missing_log_path = "/tmp/stash_missing_files.log"
     print(f"Scanning filesystem from {filesystem_path}...")
@@ -121,6 +142,9 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
     found_count = 0
     missing_count = 0
     processed_count = 0
+    
+    # New list to track and print new files
+    new_files_added = []
 
     with open(missing_log_path, 'w') as log_file:
         log_file.write(f"--- Missing Files Report - {datetime.datetime.now()} ---\n\n")
@@ -135,13 +159,21 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
                 if full_path in stash_files:
                     stash_id = stash_files[full_path]
                     try:
+                        # INSERT OR IGNORE is the core of the incremental update logic
                         local_cursor.execute(
-                            "INSERT INTO local_files (file_path, stash_file_id) VALUES (?, ?)",
+                            """INSERT OR IGNORE INTO local_files (file_path, stash_file_id) 
+                            VALUES (?, ?)""",
                             (full_path, stash_id)
                         )
-                        found_count += 1
-                    except sqlite3.IntegrityError:
-                        pass
+                        
+                        # <<< MODIFICATION HERE >>>
+                        # sqlite3.cursor.rowcount is > 0 if a row was actually inserted
+                        if local_cursor.rowcount > 0:
+                            found_count += 1
+                            new_files_added.append(full_path) 
+                        
+                    except sqlite3.Error as e:
+                        print(f"\n[DB ERROR] Failed to process {full_path}: {e}")
                 else:
                     log_file.write(f"{full_path}\n")
                     missing_count += 1
@@ -152,17 +184,23 @@ def sync_filesystem_with_stash(stash_db_path, local_db_path, filesystem_path):
                 sys.stdout.flush()
     
     local_conn.commit()
-
-    print(f"\n\nSaving in-memory database to {local_db_path}...")
-    final_conn = sqlite3.connect(local_db_path)
-    local_conn.backup(final_conn)
-    final_conn.close()
     local_conn.close()
     
-    print("\nSync complete!")
-    print(f"Found and linked {found_count} files.")
-    print(f"Files missing from stash.db: {missing_count}")
+    # 4. REPORTING NEW FILES
+    print("\n\n" + "="*50)
+    print("Sync complete! 💾")
+    
+    if new_files_added:
+        print(f"\n✅ Found and linked {len(new_files_added)} NEW files:")
+        for file_path in new_files_added:
+            print(f"  + {file_path}")
+    else:
+        print("\n✅ No new files were added to the database.")
+
+    print(f"\nFiles missing from stash.db: {missing_count}")
     print(f"Full log of missing files can be found at {missing_log_path}")
+    print("="*50)
+
 
 def ingest_edl_files(local_db_path, edl_root_path):
     """
@@ -176,6 +214,7 @@ def ingest_edl_files(local_db_path, edl_root_path):
 
     local_conn = sqlite3.connect(local_db_path)
     
+    # Pre-fetch lookup table for local files
     local_file_lookup = {}
     local_cursor = local_conn.cursor()
     local_cursor.execute("SELECT local_id, file_path FROM local_files;")
@@ -217,19 +256,30 @@ def ingest_edl_files(local_db_path, edl_root_path):
                             log_file.write(f"[{full_edl_path}] Invalid header: '{header_line}'\n")
                             continue
 
-                        # Insert EDL file and metadata
-                        edl_name_without_ext = os.path.splitext(filename)[0]
-                        style_name = re.sub(r'_chopped\d-\d$', '', edl_name_without_ext)
+                        # --- EDL File and Metadata Handling (Incremental) ---
+                        filename_norm = filename
+                        style_name = re.sub(r'_chopped\d-\d$', '', os.path.splitext(filename)[0])
                         
+                        # Use INSERT OR IGNORE for the EDL file to prevent duplicates
                         local_cursor.execute(
-                            "INSERT INTO edl_files (filename, ingested_at) VALUES (?, ?)",
-                            (filename, datetime.datetime.now())
+                            """INSERT OR IGNORE INTO edl_files (filename, ingested_at) 
+                            VALUES (?, ?)""",
+                            (filename_norm, datetime.datetime.now())
                         )
-                        edl_id = local_cursor.lastrowid
+                        
+                        # Get the ID (whether inserted or already existing)
                         local_cursor.execute(
-                            "INSERT INTO edl_metadata (edl_id, style) VALUES (?, ?)",
+                            "SELECT edl_id FROM edl_files WHERE filename = ?", (filename_norm,)
+                        )
+                        edl_id = local_cursor.fetchone()[0]
+
+                        # Use INSERT OR IGNORE for metadata
+                        local_cursor.execute(
+                            """INSERT OR IGNORE INTO edl_metadata (edl_id, style) 
+                            VALUES (?, ?)""",
                             (edl_id, style_name)
                         )
+                        # --- End EDL File and Metadata Handling ---
 
                         for line_number, line in enumerate(lines[1:], 2):
                             line = line.strip()
@@ -247,13 +297,16 @@ def ingest_edl_files(local_db_path, edl_root_path):
                                     length_ms = float(length_s) * 1000
                                     
                                     try:
+                                        # INSERT OR IGNORE is the core of the incremental update logic here too
                                         local_cursor.execute(
-                                            "INSERT INTO edl_records (edl_id, local_file_id, start_time_ms, length_ms) VALUES (?, ?, ?, ?)",
+                                            """INSERT OR IGNORE INTO edl_records (edl_id, local_file_id, start_time_ms, length_ms) 
+                                            VALUES (?, ?, ?, ?)""",
                                             (edl_id, local_id, start_time_ms, length_ms)
                                         )
-                                        records_added_count += 1
-                                    except sqlite3.IntegrityError:
-                                        pass
+                                        if local_cursor.rowcount > 0:
+                                            records_added_count += 1
+                                    except sqlite3.Error as e:
+                                        log_file.write(f"\n[DB ERROR] Failed to insert record in {filename_norm} line {line_number}: {e}")
                                 else:
                                     log_file.write(f"[{full_edl_path}:{line_number}] File path not found in local DB: {normalized_path}\n")
                             else:
@@ -270,9 +323,14 @@ def ingest_edl_files(local_db_path, edl_root_path):
     local_conn.commit()
     local_conn.close()
     
-    print("\n\nEDL Ingestion complete!")
+    print("\n\nEDL Ingestion complete! 🚀")
     print(f"Added {records_added_count} unique EDL records.")
     print(f"Full log of errors can be found at {ingestion_log_path}")
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# MAIN EXECUTION
+# ----------------------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -280,9 +338,16 @@ if __name__ == "__main__":
     )
     subparsers = parser.add_subparsers(dest='command', help='Available commands', required=True)
 
+    # --- SYNC COMMAND ---
     sync_parser = subparsers.add_parser('sync', help='Scan a filesystem and sync with Stash.')
     sync_parser.add_argument('filesystem_root', help="The root directory of the media library to scan.")
+    sync_parser.add_argument(
+        '--rebuild', 
+        action='store_true', 
+        help="Completely delete and rebuild the local database file before syncing. Use only when necessary."
+    )
     
+    # --- INGEST COMMAND ---
     ingest_parser = subparsers.add_parser('ingest', help='Ingest EDL files from a directory.')
     ingest_parser.add_argument('edl_root', help="The root directory containing EDL files.")
     
@@ -299,7 +364,7 @@ if __name__ == "__main__":
         if not os.path.isdir(args.filesystem_root):
             print(f"Error: Filesystem root '{args.filesystem_root}' is not a valid directory.")
             sys.exit(1)
-        sync_filesystem_with_stash(stash_db_path, local_db_path, args.filesystem_root)
+        sync_filesystem_with_stash(stash_db_path, local_db_path, args.filesystem_root, args.rebuild)
     elif args.command == 'ingest':
         if not os.path.isdir(args.edl_root):
             print(f"Error: EDL root '{args.edl_root}' is not a valid directory.")
